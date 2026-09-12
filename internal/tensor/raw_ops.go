@@ -8,6 +8,7 @@ package tensor
 import (
 	"fmt"
 	"math"
+	"sort"
 )
 
 // ReLU applies the ReLU activation function element-wise: max(x, 0).
@@ -1500,6 +1501,478 @@ func gatherInt32(in, out []int32, xShape Shape, indices []int, axis int) {
 	}
 }
 
+// GatherElements indexes into the input data tensor along a specified axis using an indices tensor.
+// Output shape is identical to indices shape, and rank of data and indices must match.
+//
+//nolint:gocyclo,cyclop // GatherElements indexing has inherent complexity
+func GatherElements(data, indices *RawTensor, axis int) (*RawTensor, error) {
+	if data == nil || indices == nil {
+		return nil, fmt.Errorf("GatherElements: input tensors cannot be nil")
+	}
+
+	rank := len(data.shape)
+	if rank == 0 {
+		return nil, fmt.Errorf("GatherElements: data tensor cannot be 0-D scalar")
+	}
+	if len(indices.shape) != rank {
+		return nil, fmt.Errorf("GatherElements: data rank %d and indices rank %d must match", rank, len(indices.shape))
+	}
+
+	if axis < 0 {
+		axis = rank + axis
+	}
+	if axis < 0 || axis >= rank {
+		return nil, fmt.Errorf("GatherElements: axis %d out of range [-d, d-1] for rank %d", axis, rank)
+	}
+
+	for d := 0; d < rank; d++ {
+		if d != axis && indices.shape[d] > data.shape[d] {
+			return nil, fmt.Errorf("GatherElements: indices dimension %d (%d) exceeds data dimension (%d)", d, indices.shape[d], data.shape[d])
+		}
+	}
+
+	out, err := NewRaw(indices.shape, data.dtype, data.device)
+	if err != nil {
+		return nil, fmt.Errorf("GatherElements: %w", err)
+	}
+
+	var indexData []int
+	switch indices.dtype {
+	case Int32:
+		idx32 := indices.AsInt32()
+		indexData = make([]int, len(idx32))
+		for i, v := range idx32 {
+			indexData[i] = int(v)
+		}
+	case Int64:
+		idx64 := indices.AsInt64()
+		indexData = make([]int, len(idx64))
+		for i, v := range idx64 {
+			indexData[i] = int(v)
+		}
+	default:
+		return nil, fmt.Errorf("GatherElements: indices must be int32 or int64, got %v", indices.dtype)
+	}
+
+	dataAxisSize := data.shape[axis]
+	for i, v := range indexData {
+		if v < 0 {
+			v += dataAxisSize
+			indexData[i] = v
+		}
+		if v < 0 || v >= dataAxisSize {
+			return nil, fmt.Errorf("GatherElements: index %d out of bounds for axis size %d", v, dataAxisSize)
+		}
+	}
+
+	dataStrides := data.shape.ComputeStrides()
+	idxShape := indices.shape
+
+	preSize := 1
+	for i := 0; i < axis; i++ {
+		preSize *= idxShape[i]
+	}
+	idxAxisSize := idxShape[axis]
+	postSize := 1
+	for i := axis + 1; i < rank; i++ {
+		postSize *= idxShape[i]
+	}
+
+	dataPrefixOffsets := make([]int, preSize)
+	for p := 0; p < preSize; p++ {
+		rem := p
+		off := 0
+		for d := axis - 1; d >= 0; d-- {
+			coord := rem % idxShape[d]
+			rem /= idxShape[d]
+			off += coord * dataStrides[d]
+		}
+		dataPrefixOffsets[p] = off
+	}
+
+	dataSuffixOffsets := make([]int, postSize)
+	for s := 0; s < postSize; s++ {
+		rem := s
+		off := 0
+		for d := rank - 1; d >= axis+1; d-- {
+			coord := rem % idxShape[d]
+			rem /= idxShape[d]
+			off += coord * dataStrides[d]
+		}
+		dataSuffixOffsets[s] = off
+	}
+
+	dataAxisStride := dataStrides[axis]
+
+	switch data.dtype {
+	case Float32:
+		gatherElementsFloat32(data.AsFloat32(), out.AsFloat32(), indexData, preSize, idxAxisSize, postSize, dataAxisStride, dataPrefixOffsets, dataSuffixOffsets)
+	case Float64:
+		gatherElementsFloat64(data.AsFloat64(), out.AsFloat64(), indexData, preSize, idxAxisSize, postSize, dataAxisStride, dataPrefixOffsets, dataSuffixOffsets)
+	case Int64:
+		gatherElementsInt64(data.AsInt64(), out.AsInt64(), indexData, preSize, idxAxisSize, postSize, dataAxisStride, dataPrefixOffsets, dataSuffixOffsets)
+	case Int32:
+		gatherElementsInt32(data.AsInt32(), out.AsInt32(), indexData, preSize, idxAxisSize, postSize, dataAxisStride, dataPrefixOffsets, dataSuffixOffsets)
+	case Uint8:
+		gatherElementsUint8(data.AsUint8(), out.AsUint8(), indexData, preSize, idxAxisSize, postSize, dataAxisStride, dataPrefixOffsets, dataSuffixOffsets)
+	case Bool:
+		gatherElementsBool(data.AsBool(), out.AsBool(), indexData, preSize, idxAxisSize, postSize, dataAxisStride, dataPrefixOffsets, dataSuffixOffsets)
+	default:
+		return nil, fmt.Errorf("GatherElements: unsupported dtype %v", data.dtype)
+	}
+
+	return out, nil
+}
+
+func gatherElementsFloat32(in, out []float32, indices []int, preSize, idxAxisSize, postSize, dataAxisStride int, dataPrefixOffsets, dataSuffixOffsets []int) {
+	pos := 0
+	for p := 0; p < preSize; p++ {
+		pOff := dataPrefixOffsets[p]
+		for a := 0; a < idxAxisSize; a++ {
+			for s := 0; s < postSize; s++ {
+				idx := indices[pos]
+				out[pos] = in[pOff+idx*dataAxisStride+dataSuffixOffsets[s]]
+				pos++
+			}
+		}
+	}
+}
+
+func gatherElementsFloat64(in, out []float64, indices []int, preSize, idxAxisSize, postSize, dataAxisStride int, dataPrefixOffsets, dataSuffixOffsets []int) {
+	pos := 0
+	for p := 0; p < preSize; p++ {
+		pOff := dataPrefixOffsets[p]
+		for a := 0; a < idxAxisSize; a++ {
+			for s := 0; s < postSize; s++ {
+				idx := indices[pos]
+				out[pos] = in[pOff+idx*dataAxisStride+dataSuffixOffsets[s]]
+				pos++
+			}
+		}
+	}
+}
+
+func gatherElementsInt64(in, out []int64, indices []int, preSize, idxAxisSize, postSize, dataAxisStride int, dataPrefixOffsets, dataSuffixOffsets []int) {
+	pos := 0
+	for p := 0; p < preSize; p++ {
+		pOff := dataPrefixOffsets[p]
+		for a := 0; a < idxAxisSize; a++ {
+			for s := 0; s < postSize; s++ {
+				idx := indices[pos]
+				out[pos] = in[pOff+idx*dataAxisStride+dataSuffixOffsets[s]]
+				pos++
+			}
+		}
+	}
+}
+
+func gatherElementsInt32(in, out []int32, indices []int, preSize, idxAxisSize, postSize, dataAxisStride int, dataPrefixOffsets, dataSuffixOffsets []int) {
+	pos := 0
+	for p := 0; p < preSize; p++ {
+		pOff := dataPrefixOffsets[p]
+		for a := 0; a < idxAxisSize; a++ {
+			for s := 0; s < postSize; s++ {
+				idx := indices[pos]
+				out[pos] = in[pOff+idx*dataAxisStride+dataSuffixOffsets[s]]
+				pos++
+			}
+		}
+	}
+}
+
+func gatherElementsUint8(in, out []uint8, indices []int, preSize, idxAxisSize, postSize, dataAxisStride int, dataPrefixOffsets, dataSuffixOffsets []int) {
+	pos := 0
+	for p := 0; p < preSize; p++ {
+		pOff := dataPrefixOffsets[p]
+		for a := 0; a < idxAxisSize; a++ {
+			for s := 0; s < postSize; s++ {
+				idx := indices[pos]
+				out[pos] = in[pOff+idx*dataAxisStride+dataSuffixOffsets[s]]
+				pos++
+			}
+		}
+	}
+}
+
+func gatherElementsBool(in, out []bool, indices []int, preSize, idxAxisSize, postSize, dataAxisStride int, dataPrefixOffsets, dataSuffixOffsets []int) {
+	pos := 0
+	for p := 0; p < preSize; p++ {
+		pOff := dataPrefixOffsets[p]
+		for a := 0; a < idxAxisSize; a++ {
+			for s := 0; s < postSize; s++ {
+				idx := indices[pos]
+				out[pos] = in[pOff+idx*dataAxisStride+dataSuffixOffsets[s]]
+				pos++
+			}
+		}
+	}
+}
+
+// TopK retrieves the top-K largest or smallest elements along a specified axis.
+// Returns two tensors: Values (same dtype as x) and Indices (int64).
+//
+//nolint:gocyclo,cyclop // TopK switching on dtypes has inherent complexity
+func TopK(x *RawTensor, k int, axis int, largest bool, sorted bool) (values *RawTensor, indices *RawTensor, err error) {
+	if x == nil {
+		return nil, nil, fmt.Errorf("TopK: input tensor is nil")
+	}
+	rank := len(x.shape)
+	if rank == 0 {
+		return nil, nil, fmt.Errorf("TopK: input tensor cannot be 0-D scalar")
+	}
+
+	if axis < 0 {
+		axis = rank + axis
+	}
+	if axis < 0 || axis >= rank {
+		return nil, nil, fmt.Errorf("TopK: axis %d out of range [-d, d-1] for rank %d", axis, rank)
+	}
+
+	axisDim := x.shape[axis]
+	if k <= 0 || k > axisDim {
+		return nil, nil, fmt.Errorf("TopK: k must be in range [1, %d], got %d", axisDim, k)
+	}
+
+	outShape := make(Shape, rank)
+	copy(outShape, x.shape)
+	outShape[axis] = k
+
+	vals, err := NewRaw(outShape, x.dtype, x.device)
+	if err != nil {
+		return nil, nil, fmt.Errorf("TopK values: %w", err)
+	}
+	idxs, err := NewRaw(outShape, Int64, x.device)
+	if err != nil {
+		return nil, nil, fmt.Errorf("TopK indices: %w", err)
+	}
+
+	preSize := 1
+	for i := 0; i < axis; i++ {
+		preSize *= x.shape[i]
+	}
+	postSize := 1
+	for i := axis + 1; i < rank; i++ {
+		postSize *= x.shape[i]
+	}
+
+	switch x.dtype {
+	case Float32:
+		topKFloat32(x.AsFloat32(), vals.AsFloat32(), idxs.AsInt64(), preSize, axisDim, postSize, k, largest)
+	case Float64:
+		topKFloat64(x.AsFloat64(), vals.AsFloat64(), idxs.AsInt64(), preSize, axisDim, postSize, k, largest)
+	case Int64:
+		topKInt64(x.AsInt64(), vals.AsInt64(), idxs.AsInt64(), preSize, axisDim, postSize, k, largest)
+	case Int32:
+		topKInt32(x.AsInt32(), vals.AsInt32(), idxs.AsInt64(), preSize, axisDim, postSize, k, largest)
+	case Uint8:
+		topKUint8(x.AsUint8(), vals.AsUint8(), idxs.AsInt64(), preSize, axisDim, postSize, k, largest)
+	default:
+		return nil, nil, fmt.Errorf("TopK: unsupported dtype %v", x.dtype)
+	}
+
+	return vals, idxs, nil
+}
+
+type topKItemF32 struct {
+	val float32
+	idx int64
+}
+
+func topKFloat32(in, outVals []float32, outIdxs []int64, preSize, axisDim, postSize, k int, largest bool) {
+	items := make([]topKItemF32, axisDim)
+	for p := 0; p < preSize; p++ {
+		pInBase := p * axisDim * postSize
+		pOutBase := p * k * postSize
+		for s := 0; s < postSize; s++ {
+			for a := 0; a < axisDim; a++ {
+				items[a] = topKItemF32{
+					val: in[pInBase+a*postSize+s],
+					idx: int64(a),
+				}
+			}
+			if largest {
+				sort.Slice(items, func(i, j int) bool {
+					if items[i].val == items[j].val {
+						return items[i].idx < items[j].idx
+					}
+					return items[i].val > items[j].val
+				})
+			} else {
+				sort.Slice(items, func(i, j int) bool {
+					if items[i].val == items[j].val {
+						return items[i].idx < items[j].idx
+					}
+					return items[i].val < items[j].val
+				})
+			}
+			for i := 0; i < k; i++ {
+				outVals[pOutBase+i*postSize+s] = items[i].val
+				outIdxs[pOutBase+i*postSize+s] = items[i].idx
+			}
+		}
+	}
+}
+
+type topKItemF64 struct {
+	val float64
+	idx int64
+}
+
+func topKFloat64(in, outVals []float64, outIdxs []int64, preSize, axisDim, postSize, k int, largest bool) {
+	items := make([]topKItemF64, axisDim)
+	for p := 0; p < preSize; p++ {
+		pInBase := p * axisDim * postSize
+		pOutBase := p * k * postSize
+		for s := 0; s < postSize; s++ {
+			for a := 0; a < axisDim; a++ {
+				items[a] = topKItemF64{
+					val: in[pInBase+a*postSize+s],
+					idx: int64(a),
+				}
+			}
+			if largest {
+				sort.Slice(items, func(i, j int) bool {
+					if items[i].val == items[j].val {
+						return items[i].idx < items[j].idx
+					}
+					return items[i].val > items[j].val
+				})
+			} else {
+				sort.Slice(items, func(i, j int) bool {
+					if items[i].val == items[j].val {
+						return items[i].idx < items[j].idx
+					}
+					return items[i].val < items[j].val
+				})
+			}
+			for i := 0; i < k; i++ {
+				outVals[pOutBase+i*postSize+s] = items[i].val
+				outIdxs[pOutBase+i*postSize+s] = items[i].idx
+			}
+		}
+	}
+}
+
+type topKItemI64 struct {
+	val int64
+	idx int64
+}
+
+func topKInt64(in, outVals []int64, outIdxs []int64, preSize, axisDim, postSize, k int, largest bool) {
+	items := make([]topKItemI64, axisDim)
+	for p := 0; p < preSize; p++ {
+		pInBase := p * axisDim * postSize
+		pOutBase := p * k * postSize
+		for s := 0; s < postSize; s++ {
+			for a := 0; a < axisDim; a++ {
+				items[a] = topKItemI64{
+					val: in[pInBase+a*postSize+s],
+					idx: int64(a),
+				}
+			}
+			if largest {
+				sort.Slice(items, func(i, j int) bool {
+					if items[i].val == items[j].val {
+						return items[i].idx < items[j].idx
+					}
+					return items[i].val > items[j].val
+				})
+			} else {
+				sort.Slice(items, func(i, j int) bool {
+					if items[i].val == items[j].val {
+						return items[i].idx < items[j].idx
+					}
+					return items[i].val < items[j].val
+				})
+			}
+			for i := 0; i < k; i++ {
+				outVals[pOutBase+i*postSize+s] = items[i].val
+				outIdxs[pOutBase+i*postSize+s] = items[i].idx
+			}
+		}
+	}
+}
+
+type topKItemI32 struct {
+	val int32
+	idx int64
+}
+
+func topKInt32(in, outVals []int32, outIdxs []int64, preSize, axisDim, postSize, k int, largest bool) {
+	items := make([]topKItemI32, axisDim)
+	for p := 0; p < preSize; p++ {
+		pInBase := p * axisDim * postSize
+		pOutBase := p * k * postSize
+		for s := 0; s < postSize; s++ {
+			for a := 0; a < axisDim; a++ {
+				items[a] = topKItemI32{
+					val: in[pInBase+a*postSize+s],
+					idx: int64(a),
+				}
+			}
+			if largest {
+				sort.Slice(items, func(i, j int) bool {
+					if items[i].val == items[j].val {
+						return items[i].idx < items[j].idx
+					}
+					return items[i].val > items[j].val
+				})
+			} else {
+				sort.Slice(items, func(i, j int) bool {
+					if items[i].val == items[j].val {
+						return items[i].idx < items[j].idx
+					}
+					return items[i].val < items[j].val
+				})
+			}
+			for i := 0; i < k; i++ {
+				outVals[pOutBase+i*postSize+s] = items[i].val
+				outIdxs[pOutBase+i*postSize+s] = items[i].idx
+			}
+		}
+	}
+}
+
+type topKItemU8 struct {
+	val uint8
+	idx int64
+}
+
+func topKUint8(in, outVals []uint8, outIdxs []int64, preSize, axisDim, postSize, k int, largest bool) {
+	items := make([]topKItemU8, axisDim)
+	for p := 0; p < preSize; p++ {
+		pInBase := p * axisDim * postSize
+		pOutBase := p * k * postSize
+		for s := 0; s < postSize; s++ {
+			for a := 0; a < axisDim; a++ {
+				items[a] = topKItemU8{
+					val: in[pInBase+a*postSize+s],
+					idx: int64(a),
+				}
+			}
+			if largest {
+				sort.Slice(items, func(i, j int) bool {
+					if items[i].val == items[j].val {
+						return items[i].idx < items[j].idx
+					}
+					return items[i].val > items[j].val
+				})
+			} else {
+				sort.Slice(items, func(i, j int) bool {
+					if items[i].val == items[j].val {
+						return items[i].idx < items[j].idx
+					}
+					return items[i].val < items[j].val
+				})
+			}
+			for i := 0; i < k; i++ {
+				outVals[pOutBase+i*postSize+s] = items[i].val
+				outIdxs[pOutBase+i*postSize+s] = items[i].idx
+			}
+		}
+	}
+}
+
 // Flatten flattens tensor from axis onward into a single dimension.
 func Flatten(x *RawTensor, axis int) (*RawTensor, error) {
 	if x == nil {
@@ -2158,6 +2631,342 @@ func broadcastIndex(idx []int, shape Shape, strides []int) int {
 	return result
 }
 
+// Mod computes element-wise modulus (remainder of division) of two tensors with broadcasting.
+// Attribute fmod:
+//   - 0 (default): floor_mod (Python % behavior). Sign of remainder matches divisor b.
+//   - 1: fmod (C fmod / % behavior). Sign of remainder matches dividend a.
+//
+//nolint:gocyclo,cyclop // Mod has inherent complexity across dtypes and broadcast shapes
+func Mod(a, b *RawTensor, fmod int64) (*RawTensor, error) {
+	if a == nil || b == nil {
+		return nil, fmt.Errorf("Mod: input tensors cannot be nil")
+	}
+	if a.dtype != b.dtype {
+		return nil, fmt.Errorf("Mod: input dtypes must match, got %v and %v", a.dtype, b.dtype)
+	}
+
+	shape, _, err := BroadcastShapes(a.shape, b.shape)
+	if err != nil {
+		return nil, fmt.Errorf("Mod: %w", err)
+	}
+
+	out, err := NewRaw(shape, a.dtype, a.device)
+	if err != nil {
+		return nil, fmt.Errorf("Mod: %w", err)
+	}
+
+	if out.NumElements() == 0 {
+		return out, nil
+	}
+
+	switch a.dtype {
+	case Float32:
+		err = modFloat32(a.AsFloat32(), b.AsFloat32(), out.AsFloat32(), a.shape, b.shape, shape, fmod)
+	case Float64:
+		err = modFloat64(a.AsFloat64(), b.AsFloat64(), out.AsFloat64(), a.shape, b.shape, shape, fmod)
+	case Int32:
+		err = modInt32(a.AsInt32(), b.AsInt32(), out.AsInt32(), a.shape, b.shape, shape, fmod)
+	case Int64:
+		err = modInt64(a.AsInt64(), b.AsInt64(), out.AsInt64(), a.shape, b.shape, shape, fmod)
+	case Uint8:
+		err = modUint8(a.AsUint8(), b.AsUint8(), out.AsUint8(), a.shape, b.shape, shape, fmod)
+	default:
+		return nil, fmt.Errorf("Mod: unsupported dtype %v", a.dtype)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func calcModF32(x, y float32, fmod int64) float32 {
+	if fmod != 0 {
+		return float32(math.Mod(float64(x), float64(y)))
+	}
+	return float32(float64(x) - float64(y)*math.Floor(float64(x)/float64(y)))
+}
+
+func modFloat32(a, b, out []float32, aShape, bShape, outShape Shape, fmod int64) error {
+	total := len(out)
+	if aShape.Equal(bShape) {
+		for i := 0; i < total; i++ {
+			out[i] = calcModF32(a[i], b[i], fmod)
+		}
+		return nil
+	}
+	if len(b) == 1 {
+		bVal := b[0]
+		for i := 0; i < total; i++ {
+			out[i] = calcModF32(a[i], bVal, fmod)
+		}
+		return nil
+	}
+	if len(a) == 1 {
+		aVal := a[0]
+		for i := 0; i < total; i++ {
+			out[i] = calcModF32(aVal, b[i], fmod)
+		}
+		return nil
+	}
+
+	aStrides := aShape.ComputeStrides()
+	bStrides := bShape.ComputeStrides()
+	idx := make([]int, len(outShape))
+	for i := 0; i < total; i++ {
+		tmp := i
+		for j := len(outShape) - 1; j >= 0; j-- {
+			idx[j] = tmp % outShape[j]
+			tmp /= outShape[j]
+		}
+		aIdx := broadcastIndex(idx, aShape, aStrides)
+		bIdx := broadcastIndex(idx, bShape, bStrides)
+		out[i] = calcModF32(a[aIdx], b[bIdx], fmod)
+	}
+	return nil
+}
+
+func calcModF64(x, y float64, fmod int64) float64 {
+	if fmod != 0 {
+		return math.Mod(x, y)
+	}
+	return x - y*math.Floor(x/y)
+}
+
+func modFloat64(a, b, out []float64, aShape, bShape, outShape Shape, fmod int64) error {
+	total := len(out)
+	if aShape.Equal(bShape) {
+		for i := 0; i < total; i++ {
+			out[i] = calcModF64(a[i], b[i], fmod)
+		}
+		return nil
+	}
+	if len(b) == 1 {
+		bVal := b[0]
+		for i := 0; i < total; i++ {
+			out[i] = calcModF64(a[i], bVal, fmod)
+		}
+		return nil
+	}
+	if len(a) == 1 {
+		aVal := a[0]
+		for i := 0; i < total; i++ {
+			out[i] = calcModF64(aVal, b[i], fmod)
+		}
+		return nil
+	}
+
+	aStrides := aShape.ComputeStrides()
+	bStrides := bShape.ComputeStrides()
+	idx := make([]int, len(outShape))
+	for i := 0; i < total; i++ {
+		tmp := i
+		for j := len(outShape) - 1; j >= 0; j-- {
+			idx[j] = tmp % outShape[j]
+			tmp /= outShape[j]
+		}
+		aIdx := broadcastIndex(idx, aShape, aStrides)
+		bIdx := broadcastIndex(idx, bShape, bStrides)
+		out[i] = calcModF64(a[aIdx], b[bIdx], fmod)
+	}
+	return nil
+}
+
+func calcModI64(x, y int64, fmod int64) (int64, error) {
+	if y == 0 {
+		return 0, fmt.Errorf("Mod: integer division by zero")
+	}
+	if y == -1 && x == math.MinInt64 {
+		return 0, nil
+	}
+	rem := x % y
+	if fmod == 0 {
+		if rem != 0 && ((rem < 0) != (y < 0)) {
+			rem += y
+		}
+	}
+	return rem, nil
+}
+
+func modInt64(a, b, out []int64, aShape, bShape, outShape Shape, fmod int64) error {
+	total := len(out)
+	var err error
+	if aShape.Equal(bShape) {
+		for i := 0; i < total; i++ {
+			out[i], err = calcModI64(a[i], b[i], fmod)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if len(b) == 1 {
+		bVal := b[0]
+		for i := 0; i < total; i++ {
+			out[i], err = calcModI64(a[i], bVal, fmod)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if len(a) == 1 {
+		aVal := a[0]
+		for i := 0; i < total; i++ {
+			out[i], err = calcModI64(aVal, b[i], fmod)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	aStrides := aShape.ComputeStrides()
+	bStrides := bShape.ComputeStrides()
+	idx := make([]int, len(outShape))
+	for i := 0; i < total; i++ {
+		tmp := i
+		for j := len(outShape) - 1; j >= 0; j-- {
+			idx[j] = tmp % outShape[j]
+			tmp /= outShape[j]
+		}
+		aIdx := broadcastIndex(idx, aShape, aStrides)
+		bIdx := broadcastIndex(idx, bShape, bStrides)
+		out[i], err = calcModI64(a[aIdx], b[bIdx], fmod)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func calcModI32(x, y int32, fmod int64) (int32, error) {
+	if y == 0 {
+		return 0, fmt.Errorf("Mod: integer division by zero")
+	}
+	if y == -1 && x == math.MinInt32 {
+		return 0, nil
+	}
+	rem := x % y
+	if fmod == 0 {
+		if rem != 0 && ((rem < 0) != (y < 0)) {
+			rem += y
+		}
+	}
+	return rem, nil
+}
+
+func modInt32(a, b, out []int32, aShape, bShape, outShape Shape, fmod int64) error {
+	total := len(out)
+	var err error
+	if aShape.Equal(bShape) {
+		for i := 0; i < total; i++ {
+			out[i], err = calcModI32(a[i], b[i], fmod)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if len(b) == 1 {
+		bVal := b[0]
+		for i := 0; i < total; i++ {
+			out[i], err = calcModI32(a[i], bVal, fmod)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if len(a) == 1 {
+		aVal := a[0]
+		for i := 0; i < total; i++ {
+			out[i], err = calcModI32(aVal, b[i], fmod)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	aStrides := aShape.ComputeStrides()
+	bStrides := bShape.ComputeStrides()
+	idx := make([]int, len(outShape))
+	for i := 0; i < total; i++ {
+		tmp := i
+		for j := len(outShape) - 1; j >= 0; j-- {
+			idx[j] = tmp % outShape[j]
+			tmp /= outShape[j]
+		}
+		aIdx := broadcastIndex(idx, aShape, aStrides)
+		bIdx := broadcastIndex(idx, bShape, bStrides)
+		out[i], err = calcModI32(a[aIdx], b[bIdx], fmod)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func calcModU8(x, y uint8) (uint8, error) {
+	if y == 0 {
+		return 0, fmt.Errorf("Mod: integer division by zero")
+	}
+	return x % y, nil
+}
+
+func modUint8(a, b, out []uint8, aShape, bShape, outShape Shape, fmod int64) error {
+	total := len(out)
+	var err error
+	if aShape.Equal(bShape) {
+		for i := 0; i < total; i++ {
+			out[i], err = calcModU8(a[i], b[i])
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if len(b) == 1 {
+		bVal := b[0]
+		for i := 0; i < total; i++ {
+			out[i], err = calcModU8(a[i], bVal)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if len(a) == 1 {
+		aVal := a[0]
+		for i := 0; i < total; i++ {
+			out[i], err = calcModU8(aVal, b[i])
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	aStrides := aShape.ComputeStrides()
+	bStrides := bShape.ComputeStrides()
+	idx := make([]int, len(outShape))
+	for i := 0; i < total; i++ {
+		tmp := i
+		for j := len(outShape) - 1; j >= 0; j-- {
+			idx[j] = tmp % outShape[j]
+			tmp /= outShape[j]
+		}
+		aIdx := broadcastIndex(idx, aShape, aStrides)
+		bIdx := broadcastIndex(idx, bShape, bStrides)
+		out[i], err = calcModU8(a[aIdx], b[bIdx])
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // FullRaw creates a RawTensor filled with a constant value.
 func FullRaw(shape Shape, value float32, dtype DataType, device Device) (*RawTensor, error) {
 	result, err := NewRaw(shape, dtype, device)
@@ -2206,4 +3015,63 @@ func FullRaw(shape Shape, value float32, dtype DataType, device Device) (*RawTen
 	}
 
 	return result, nil
+}
+
+// Tile constructs a tensor by tiling a given tensor along each axis according to repeats.
+func Tile(x *RawTensor, repeats []int64) (*RawTensor, error) {
+	if x == nil {
+		return nil, fmt.Errorf("Tile: input tensor is nil")
+	}
+	if len(repeats) != len(x.shape) {
+		return nil, fmt.Errorf("Tile: repeats length (%d) must match input rank (%d)", len(repeats), len(x.shape))
+	}
+
+	dstShape := make(Shape, len(x.shape))
+	for i, r := range repeats {
+		if r <= 0 {
+			return nil, fmt.Errorf("Tile: repeats values must be positive, got %d at dimension %d", r, i)
+		}
+		dstShape[i] = x.shape[i] * int(r)
+	}
+
+	result, err := NewRaw(dstShape, x.dtype, x.device)
+	if err != nil {
+		return nil, fmt.Errorf("Tile: %w", err)
+	}
+
+	switch x.dtype {
+	case Float32:
+		tileGeneric(x.AsFloat32(), result.AsFloat32(), x.shape, dstShape)
+	case Float64:
+		tileGeneric(x.AsFloat64(), result.AsFloat64(), x.shape, dstShape)
+	case Int32:
+		tileGeneric(x.AsInt32(), result.AsInt32(), x.shape, dstShape)
+	case Int64:
+		tileGeneric(x.AsInt64(), result.AsInt64(), x.shape, dstShape)
+	case Uint8:
+		tileGeneric(x.AsUint8(), result.AsUint8(), x.shape, dstShape)
+	case Bool:
+		tileGeneric(x.AsBool(), result.AsBool(), x.shape, dstShape)
+	default:
+		return nil, fmt.Errorf("Tile: unsupported dtype %v", x.dtype)
+	}
+
+	return result, nil
+}
+
+func tileGeneric[T any](in, out []T, srcShape, dstShape Shape) {
+	srcStrides := srcShape.ComputeStrides()
+	ndim := len(dstShape)
+	total := dstShape.NumElements()
+
+	for i := 0; i < total; i++ {
+		tmp := i
+		srcFlat := 0
+		for j := ndim - 1; j >= 0; j-- {
+			idxJ := tmp % dstShape[j]
+			tmp /= dstShape[j]
+			srcFlat += (idxJ % srcShape[j]) * srcStrides[j]
+		}
+		out[i] = in[srcFlat]
+	}
 }

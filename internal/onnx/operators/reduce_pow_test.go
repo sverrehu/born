@@ -281,3 +281,66 @@ func TestPow_NilInput(t *testing.T) {
 		t.Fatal("expected error for nil input, got nil")
 	}
 }
+
+// --- Floor ---
+
+func f64Tensor(t *testing.T, shape tensor.Shape, data []float64) *tensor.RawTensor {
+	t.Helper()
+	raw, err := tensor.NewRaw(shape, tensor.Float64, tensor.CPU)
+	if err != nil {
+		t.Fatalf("NewRaw float64: %v", err)
+	}
+	copy(raw.AsFloat64(), data)
+	return raw
+}
+
+func TestFloor_Float32(t *testing.T) {
+	data := f32Tensor(t, tensor.Shape{2, 3}, []float32{-1.7, -1.0, -0.2, 0.0, 1.2, 1.9})
+	out := execOp(t, "Floor", nil, data)
+	assertShape(t, out, tensor.Shape{2, 3})
+	assertClose(t, out.AsFloat32(), []float32{-2.0, -1.0, -1.0, 0.0, 1.0, 1.0})
+}
+
+func TestFloor_Float64(t *testing.T) {
+	data := f64Tensor(t, tensor.Shape{3}, []float64{-2.5, 0.0, 2.5})
+	out := execOp(t, "Floor", nil, data)
+	assertShape(t, out, tensor.Shape{3})
+	got := out.AsFloat64()
+	want := []float64{-3.0, 0.0, 2.0}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("value[%d]: got %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestFloor_Scalar(t *testing.T) {
+	data := f32Tensor(t, tensor.Shape{}, []float32{-1.5})
+	out := execOp(t, "Floor", nil, data)
+	assertShape(t, out, tensor.Shape{})
+	assertClose(t, out.AsFloat32(), []float32{-2.0})
+}
+
+func TestFloor_WrongInputCount(t *testing.T) {
+	if err := execOpErr("Floor", nil); err == nil {
+		t.Fatal("expected error for 0 inputs, got nil")
+	}
+	t1 := f32Tensor(t, tensor.Shape{1}, []float32{1.0})
+	t2 := f32Tensor(t, tensor.Shape{1}, []float32{2.0})
+	if err := execOpErr("Floor", nil, t1, t2); err == nil {
+		t.Fatal("expected error for 2 inputs, got nil")
+	}
+}
+
+func TestFloor_NilInput(t *testing.T) {
+	if err := execOpErr("Floor", nil, (*tensor.RawTensor)(nil)); err == nil {
+		t.Fatal("expected error for nil input, got nil")
+	}
+}
+
+func TestFloor_UnsupportedDType(t *testing.T) {
+	data := i64Tensor(t, []int64{1, 2, 3})
+	if err := execOpErr("Floor", nil, data); err == nil {
+		t.Fatal("expected error for unsupported dtype, got nil")
+	}
+}

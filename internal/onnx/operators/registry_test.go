@@ -199,3 +199,19 @@ func TestRegisterConvOp(t *testing.T) {
 		t.Error("Expected Conv operator to be registered")
 	}
 }
+
+func TestRegisterTileOp(t *testing.T) {
+	r := NewRegistry()
+
+	if _, ok := r.Get("Tile"); !ok {
+		t.Error("Expected Tile operator to be registered")
+	}
+}
+
+func TestRegisterModOp(t *testing.T) {
+	r := NewRegistry()
+
+	if _, ok := r.Get("Mod"); !ok {
+		t.Error("Expected Mod operator to be registered")
+	}
+}

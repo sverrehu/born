@@ -23,6 +23,57 @@ func (r *Registry) registerMathOps() {
 	r.Register("Sum", handleSum)
 	r.Register("Erf", handleErf)
 	r.Register("Pow", handlePow)
+	r.Register("Floor", handleFloor)
+	r.Register("Mod", handleMod)
+}
+
+func handleMod(_ *Context, node *Node, inputs []*tensor.RawTensor) ([]*tensor.RawTensor, error) {
+	if len(inputs) != 2 {
+		return nil, fmt.Errorf("mod requires 2 inputs, got %d", len(inputs))
+	}
+	if inputs[0] == nil || inputs[1] == nil {
+		return nil, fmt.Errorf("mod: nil input")
+	}
+	fmod := GetAttrInt(node, "fmod", 0)
+	result, err := tensor.Mod(inputs[0], inputs[1], fmod)
+	if err != nil {
+		return nil, fmt.Errorf("mod: %w", err)
+	}
+	return []*tensor.RawTensor{result}, nil
+}
+
+func handleFloor(_ *Context, _ *Node, inputs []*tensor.RawTensor) ([]*tensor.RawTensor, error) {
+	if len(inputs) != 1 {
+		return nil, fmt.Errorf("floor requires 1 input, got %d", len(inputs))
+	}
+	if inputs[0] == nil {
+		return nil, fmt.Errorf("floor: nil input")
+	}
+	x := inputs[0]
+	out, err := tensor.NewRaw(x.Shape(), x.DType(), tensor.CPU)
+	if err != nil {
+		return nil, fmt.Errorf("floor: %w", err)
+	}
+	if x.NumElements() == 0 {
+		return []*tensor.RawTensor{out}, nil
+	}
+	switch x.DType() {
+	case tensor.Float32:
+		in := x.AsFloat32()
+		od := out.AsFloat32()
+		for i, v := range in {
+			od[i] = float32(math.Floor(float64(v)))
+		}
+	case tensor.Float64:
+		in := x.AsFloat64()
+		od := out.AsFloat64()
+		for i, v := range in {
+			od[i] = math.Floor(v)
+		}
+	default:
+		return nil, fmt.Errorf("floor: unsupported dtype %s", x.DType())
+	}
+	return []*tensor.RawTensor{out}, nil
 }
 
 // handlePow implements ONNX Pow: elementwise base ** exponent.

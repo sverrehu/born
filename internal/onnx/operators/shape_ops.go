@@ -18,8 +18,11 @@ func (r *Registry) registerShapeOps() {
 	r.Register("Split", handleSplit)
 	r.Register("Slice", handleSlice)
 	r.Register("Gather", handleGather)
+	r.Register("GatherElements", handleGatherElements)
+	r.Register("TopK", handleTopK)
 	r.Register("Flatten", handleFlatten)
 	r.Register("Expand", handleExpand)
+	r.Register("Tile", handleTile)
 }
 
 func handleReshape(_ *Context, _ *Node, inputs []*tensor.RawTensor) ([]*tensor.RawTensor, error) {
@@ -212,6 +215,55 @@ func handleGather(_ *Context, node *Node, inputs []*tensor.RawTensor) ([]*tensor
 	return []*tensor.RawTensor{result}, nil
 }
 
+func handleGatherElements(_ *Context, node *Node, inputs []*tensor.RawTensor) ([]*tensor.RawTensor, error) {
+	if len(inputs) != 2 {
+		return nil, fmt.Errorf("gatherElements requires 2 inputs (data, indices), got %d", len(inputs))
+	}
+
+	axis := int(GetAttrInt(node, "axis", 0))
+
+	result, err := tensor.GatherElements(inputs[0], inputs[1], axis)
+	if err != nil {
+		return nil, fmt.Errorf("gatherElements: %w", err)
+	}
+	return []*tensor.RawTensor{result}, nil
+}
+
+func handleTopK(_ *Context, node *Node, inputs []*tensor.RawTensor) ([]*tensor.RawTensor, error) {
+	if len(inputs) < 1 || inputs[0] == nil {
+		return nil, fmt.Errorf("topK requires at least 1 input (X), got %d", len(inputs))
+	}
+	x := inputs[0]
+
+	var k int
+	if len(inputs) >= 2 && inputs[1] != nil {
+		kTensor := inputs[1]
+		if kTensor.NumElements() != 1 {
+			return nil, fmt.Errorf("topK: K tensor must have 1 element, got %d", kTensor.NumElements())
+		}
+		switch kTensor.DType() {
+		case tensor.Int64:
+			k = int(kTensor.AsInt64()[0])
+		case tensor.Int32:
+			k = int(kTensor.AsInt32()[0])
+		default:
+			return nil, fmt.Errorf("topK: K tensor must be int64 or int32, got %v", kTensor.DType())
+		}
+	} else {
+		k = int(GetAttrInt(node, "k", 0))
+	}
+
+	axis := int(GetAttrInt(node, "axis", -1))
+	largest := GetAttrInt(node, "largest", 1) != 0
+	sorted := GetAttrInt(node, "sorted", 1) != 0
+
+	values, indices, err := tensor.TopK(x, k, axis, largest, sorted)
+	if err != nil {
+		return nil, fmt.Errorf("topK: %w", err)
+	}
+	return []*tensor.RawTensor{values, indices}, nil
+}
+
 func handleFlatten(_ *Context, node *Node, inputs []*tensor.RawTensor) ([]*tensor.RawTensor, error) {
 	if len(inputs) != 1 {
 		return nil, fmt.Errorf("flatten requires 1 input, got %d", len(inputs))
@@ -241,6 +293,39 @@ func handleExpand(_ *Context, _ *Node, inputs []*tensor.RawTensor) ([]*tensor.Ra
 	result, err := tensor.Expand(inputs[0], targetShape)
 	if err != nil {
 		return nil, fmt.Errorf("expand: %w", err)
+	}
+	return []*tensor.RawTensor{result}, nil
+}
+
+func handleTile(_ *Context, _ *Node, inputs []*tensor.RawTensor) ([]*tensor.RawTensor, error) {
+	if len(inputs) != 2 {
+		return nil, fmt.Errorf("tile requires 2 inputs (input, repeats), got %d", len(inputs))
+	}
+	if inputs[0] == nil {
+		return nil, fmt.Errorf("tile: nil input tensor")
+	}
+	if inputs[1] == nil {
+		return nil, fmt.Errorf("tile: nil repeats tensor")
+	}
+
+	repeatsTensor := inputs[1]
+	var repeats []int64
+	switch repeatsTensor.DType() {
+	case tensor.Int64:
+		repeats = repeatsTensor.AsInt64()
+	case tensor.Int32:
+		repeatsI32 := repeatsTensor.AsInt32()
+		repeats = make([]int64, len(repeatsI32))
+		for i, v := range repeatsI32 {
+			repeats[i] = int64(v)
+		}
+	default:
+		return nil, fmt.Errorf("tile: repeats tensor must be int64 or int32, got %v", repeatsTensor.DType())
+	}
+
+	result, err := tensor.Tile(inputs[0], repeats)
+	if err != nil {
+		return nil, fmt.Errorf("tile: %w", err)
 	}
 	return []*tensor.RawTensor{result}, nil
 }
