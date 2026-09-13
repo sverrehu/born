@@ -3,8 +3,10 @@
 package onnx
 
 import (
+	"encoding/binary"
 	"fmt"
 
+	"github.com/born-ml/born/internal/half"
 	"github.com/born-ml/born/internal/onnx/operators"
 	"github.com/born-ml/born/internal/tensor"
 )
@@ -210,16 +212,48 @@ func tensorFromProto(proto *TensorProto) (*tensor.RawTensor, error) {
 	// Copy data - check which data field is populated (mutually exclusive).
 	//nolint:gocritic // ifElseChain: checking mutually exclusive data fields.
 	if len(proto.RawData) > 0 {
-		// Raw binary data - most common
-		copy(t.Data(), proto.RawData)
+		if proto.DataType == TensorProtoFloat16 {
+			dst := t.AsFloat32()
+			numElems := len(proto.RawData) / 2
+			for i := 0; i < numElems && i < len(dst); i++ {
+				u := binary.LittleEndian.Uint16(proto.RawData[2*i:])
+				dst[i] = half.Float16ToFloat32(u)
+			}
+		} else if proto.DataType == TensorProtoBfloat16 {
+			dst := t.AsFloat32()
+			numElems := len(proto.RawData) / 2
+			for i := 0; i < numElems && i < len(dst); i++ {
+				u := binary.LittleEndian.Uint16(proto.RawData[2*i:])
+				dst[i] = half.BFloat16ToFloat32(u)
+			}
+		} else {
+			// Raw binary data - most common
+			copy(t.Data(), proto.RawData)
+		}
 	} else if len(proto.FloatData) > 0 {
 		// Legacy float data
 		dst := t.AsFloat32()
 		copy(dst, proto.FloatData)
 	} else if len(proto.Int32Data) > 0 {
-		// Legacy int32 data
-		dst := t.AsInt32()
-		copy(dst, proto.Int32Data)
+		if proto.DataType == TensorProtoFloat16 {
+			dst := t.AsFloat32()
+			for i, v := range proto.Int32Data {
+				if i < len(dst) {
+					dst[i] = half.Float16ToFloat32(uint16(v))
+				}
+			}
+		} else if proto.DataType == TensorProtoBfloat16 {
+			dst := t.AsFloat32()
+			for i, v := range proto.Int32Data {
+				if i < len(dst) {
+					dst[i] = half.BFloat16ToFloat32(uint16(v))
+				}
+			}
+		} else {
+			// Legacy int32 data
+			dst := t.AsInt32()
+			copy(dst, proto.Int32Data)
+		}
 	} else if len(proto.Int64Data) > 0 {
 		// Legacy int64 data
 		dst := t.AsInt64()
@@ -232,7 +266,7 @@ func tensorFromProto(proto *TensorProto) (*tensor.RawTensor, error) {
 // protoTypeToTensorType converts ONNX data type to tensor.DataType.
 func protoTypeToTensorType(onnxType int32) tensor.DataType {
 	switch onnxType {
-	case TensorProtoFloat:
+	case TensorProtoFloat, TensorProtoFloat16, TensorProtoBfloat16:
 		return tensor.Float32
 	case TensorProtoDouble:
 		return tensor.Float64

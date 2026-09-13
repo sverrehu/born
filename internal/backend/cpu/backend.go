@@ -42,14 +42,7 @@ func (cpu *CPUBackend) Add(a, b *tensor.RawTensor) *tensor.RawTensor {
 		panic(fmt.Sprintf("add: failed to create result tensor: %v", err))
 	}
 
-	// Check for inplace optimization
 	if !needsBroadcast && a.Shape().Equal(b.Shape()) {
-		// Fast path: same shape, check if we can do inplace
-		if a.IsUnique() && a != b {
-			// Inplace add into a (safe: operands don't alias)
-			addInplace(a, b)
-			return a
-		}
 		// Vectorized add
 		addVectorized(result, a, b)
 	} else {
@@ -73,10 +66,6 @@ func (cpu *CPUBackend) Sub(a, b *tensor.RawTensor) *tensor.RawTensor {
 	}
 
 	if !needsBroadcast && a.Shape().Equal(b.Shape()) {
-		if a.IsUnique() && a != b {
-			subInplace(a, b)
-			return a
-		}
 		subVectorized(result, a, b)
 	} else {
 		subWithBroadcast(result, a, b, outShape)
@@ -98,10 +87,6 @@ func (cpu *CPUBackend) Mul(a, b *tensor.RawTensor) *tensor.RawTensor {
 	}
 
 	if !needsBroadcast && a.Shape().Equal(b.Shape()) {
-		if a.IsUnique() && a != b {
-			mulInplace(a, b)
-			return a
-		}
 		mulVectorized(result, a, b)
 	} else {
 		mulWithBroadcast(result, a, b, outShape)
@@ -123,10 +108,6 @@ func (cpu *CPUBackend) Div(a, b *tensor.RawTensor) *tensor.RawTensor {
 	}
 
 	if !needsBroadcast && a.Shape().Equal(b.Shape()) {
-		if a.IsUnique() && a != b {
-			divInplace(a, b)
-			return a
-		}
 		divVectorized(result, a, b)
 	} else {
 		divWithBroadcast(result, a, b, outShape)

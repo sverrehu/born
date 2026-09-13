@@ -21,6 +21,7 @@ const (
 	TensorProtoDouble    = 11 // float64
 	TensorProtoUint32    = 12 // uint32
 	TensorProtoUint64    = 13 // uint64
+	TensorProtoBfloat16  = 16 // bfloat16
 )
 
 // ONNX auto_pad attribute values. NOTSET is the spec default (use explicit pads);

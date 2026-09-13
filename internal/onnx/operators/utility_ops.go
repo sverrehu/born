@@ -215,7 +215,7 @@ func tensorFromAttribute(attr *Attribute) (*tensor.RawTensor, error) {
 // onnxTypeToTensorType converts ONNX data type to tensor.DataType.
 func onnxTypeToTensorType(onnxType int) tensor.DataType {
 	switch onnxType {
-	case TensorProtoFloat:
+	case TensorProtoFloat, TensorProtoFloat16, TensorProtoBfloat16:
 		return tensor.Float32
 	case TensorProtoDouble:
 		return tensor.Float64

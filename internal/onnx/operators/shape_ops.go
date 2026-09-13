@@ -168,6 +168,30 @@ func handleSplit(_ *Context, node *Node, inputs []*tensor.RawTensor) ([]*tensor.
 			for i, v := range sizesAttr {
 				splitSizes[i] = int(v)
 			}
+		} else {
+			// If split is not specified, split equally among outputs
+			numOutputs := len(node.Outputs)
+			if numOutputsAttr := GetAttrInt(node, "num_outputs", 0); numOutputsAttr > 0 {
+				numOutputs = int(numOutputsAttr)
+			}
+			if numOutputs > 0 && inputs[0] != nil {
+				normAxis := axis
+				if normAxis < 0 {
+					normAxis += len(inputs[0].Shape())
+				}
+				if normAxis >= 0 && normAxis < len(inputs[0].Shape()) {
+					axisSize := inputs[0].Shape()[normAxis]
+					chunkSize := axisSize / numOutputs
+					remainder := axisSize % numOutputs
+					splitSizes = make([]int, numOutputs)
+					for i := 0; i < numOutputs; i++ {
+						splitSizes[i] = chunkSize
+						if i < remainder {
+							splitSizes[i]++
+						}
+					}
+				}
+			}
 		}
 	}
 
