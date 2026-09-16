@@ -1,5 +1,3 @@
-//go:build windows || linux
-
 // GPU Training Example — demonstrates Born GPU training loop.
 //
 // A 3-layer MLP trained on synthetic classification data.

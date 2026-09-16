@@ -1,5 +1,3 @@
-//go:build windows || linux
-
 package nn
 
 import (
